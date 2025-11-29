@@ -202,9 +202,79 @@ class XLerobot(Robot):
         return self.bus1.is_calibrated and self.bus2.is_calibrated
 
     def calibrate(self) -> None:
-        # Calibration logic (simplified for brevity as focus is on kinematics)
-        # You can implement full calibration here if needed.
-        pass
+        logger.info(f"\nRunning calibration of {self}")
+        ## calib left motors
+        left_motors = self.left_arm_motors + self.head_motors
+        self.bus1.disable_torque()
+        for name in left_motors:
+            self.bus1.write("Operating_Mode", name, OperatingMode.POSITION.value)
+        input(
+            "Move left arm and head motors to the middle of their range of motion and press ENTER...."
+        )
+        homing_offsets = self.bus1.set_half_turn_homings(left_motors)
+        homing_offsets.update(dict.fromkeys(self.right_arm_motors + self.base_motors, 0))
+
+        print(
+            f"Move all left arm and head joints sequentially through their "
+            "entire ranges of motion.\nRecording positions. Press ENTER to stop..."
+        )
+        range_mins, range_maxes = self.bus1.record_ranges_of_motion(left_motors)
+
+        calibration_left = {}
+        for name, motor in self.bus1.motors.items():
+            calibration_left[name] = MotorCalibration(
+                id=motor.id,
+                drive_mode=0,
+                homing_offset=homing_offsets[name],
+                range_min=range_mins[name],
+                range_max=range_maxes[name],
+            )
+
+        self.bus1.write_calibration(calibration_left)
+
+        # calib right motors
+        right_motors = self.right_arm_motors + self.base_motors
+        self.bus2.disable_torque(self.right_arm_motors)
+        for name in self.right_arm_motors:
+            self.bus2.write("Operating_Mode", name, OperatingMode.POSITION.value)
+
+        input(
+            "Move right arm motors to the middle of their range of motion and press ENTER...."
+        )
+
+        homing_offsets = self.bus2.set_half_turn_homings(self.right_arm_motors)
+        homing_offsets.update(dict.fromkeys(self.base_motors, 0))
+
+        full_turn_motor = [
+            motor for motor in right_motors if any(keyword in motor for keyword in ["wheel"])
+        ]
+
+        unknown_range_motors = [motor for motor in right_motors if motor not in full_turn_motor]
+        print(
+            f"Move all right arm joints except '{full_turn_motor}' sequentially through their "
+            "entire ranges of motion.\nRecording positions. Press ENTER to stop..."
+        )
+        range_mins, range_maxes = self.bus2.record_ranges_of_motion(unknown_range_motors)
+        for name in full_turn_motor:
+            range_mins[name] = 0
+            range_maxes[name] = 4095
+
+        calibration_right = {}
+
+        for name, motor in self.bus2.motors.items():
+            calibration_right[name] = MotorCalibration(
+                id=motor.id,
+                drive_mode=0,
+                homing_offset=homing_offsets[name],
+                range_min=range_mins[name],
+                range_max=range_maxes[name],
+            )
+
+        self.bus2.write_calibration(calibration_right)
+        self.calibration = {**calibration_left, **calibration_right}
+        self._save_calibration()
+        print("Calibration saved to", self.calibration_fpath)
+
 
     def configure(self):
         self.bus1.disable_torque()
