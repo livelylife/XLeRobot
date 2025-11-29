@@ -2,7 +2,7 @@
 
 # 本脚本将XLerobot的部分文件拷贝到 lerobot 安装目录下
 
-LEROBOT_DIR="$HOME/lerobot"
+LEROBOT_DIR="$HOME/workspace/lerobot"
 
 # 获取当前脚本所在的目录
 XLE_SOFTWARE_DIR=$(dirname $(readlink -f $0))

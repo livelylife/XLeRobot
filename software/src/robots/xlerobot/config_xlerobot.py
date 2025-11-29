@@ -23,24 +23,13 @@ from ..config import RobotConfig
 
 def xlerobot_cameras_config() -> dict[str, CameraConfig]:
     return {
-        # "left_wrist": OpenCVCameraConfig(
-        #     index_or_path="/dev/video0", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),
-
-        # "right_wrist": OpenCVCameraConfig(
-        #     index_or_path="/dev/video2", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),  
-
-        # "head(RGDB)": OpenCVCameraConfig(
-        #     index_or_path="/dev/video2", fps=30, width=640, height=480, rotation=Cv2Rotation.NO_ROTATION
-        # ),                     
-        
+        # 默认这里留空，你可以根据需要取消注释添加摄像头
         # "head": RealSenseCameraConfig(
-        #     serial_number_or_name="125322060037",  # Replace with camera SN
+        #     serial_number_or_name="125322060037",
         #     fps=30,
         #     width=1280,
         #     height=720,
-        #     color_mode=ColorMode.BGR, # Request BGR output
+        #     color_mode=ColorMode.BGR,
         #     rotation=Cv2Rotation.NO_ROTATION,
         #     use_depth=True
         # ),
@@ -51,37 +40,28 @@ def xlerobot_cameras_config() -> dict[str, CameraConfig]:
 @dataclass
 class XLerobotConfig(RobotConfig):
     
-    port1: str = "/dev/ttyACM0"  # port to connect to the bus (so101 + head camera)
-    port2: str = "/dev/ttyACM1"  # port to connect to the bus (same as lekiwi setup)
+    port1: str = "/dev/ttyACM2"  # port to connect to the bus (so101 + head camera)
+    port2: str = "/dev/ttyACM0"  # port to connect to the bus (same as lekiwi setup)
     disable_torque_on_disconnect: bool = True
-
-    # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.
-    # Set this to a positive scalar to have the same value for all motors, or a list that is the same length as
-    # the number of motors in your follower arms.
     max_relative_target: int | None = None
 
     cameras: dict[str, CameraConfig] = field(default_factory=xlerobot_cameras_config)
-
-    # Set to `True` for backward compatibility with previous policies/dataset
     use_degrees: bool = False
 
+    # 默认按键映射
     teleop_keys: dict[str, str] = field(
         default_factory=lambda: {
-            # Movement
             "forward": "i",
             "backward": "k",
             "left": "j",
             "right": "l",
             "rotate_left": "u",
             "rotate_right": "o",
-            # Speed control
             "speed_up": "n",
             "speed_down": "m",
-            # quit teleop
             "quit": "b",
         }
     )
-
 
 
 @dataclass
@@ -99,6 +79,7 @@ class XLerobotHostConfig:
     # If robot jitters decrease the frequency and monitor cpu load with `top` in cmd
     max_loop_freq_hz: int = 30
 
+
 @RobotConfig.register_subclass("xlerobot_client")
 @dataclass
 class XLerobotClientConfig(RobotConfig):
@@ -109,17 +90,14 @@ class XLerobotClientConfig(RobotConfig):
 
     teleop_keys: dict[str, str] = field(
         default_factory=lambda: {
-            # Movement
             "forward": "i",
             "backward": "k",
             "left": "j",
             "right": "l",
             "rotate_left": "u",
             "rotate_right": "o",
-            # Speed control
             "speed_up": "n",
             "speed_down": "m",
-            # quit teleop
             "quit": "b",
         }
     )
