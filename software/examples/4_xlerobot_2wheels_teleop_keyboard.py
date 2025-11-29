@@ -12,9 +12,64 @@ import time
 import numpy as np
 import math
 
-from lerobot.robots.xlerobot_2wheels import XLerobot2WheelsClient, XLerobot2WheelsClientConfig, XLerobot2WheelsConfig, XLerobot2Wheels
-from lerobot.utils.robot_utils import busy_wait
-from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+# import sys
+# sys.path.append("/home/joyandai/workspace/lerobot/src/")
+import sys
+import select
+import tty
+import termios
+import threading
+
+class SSHKeyboard:
+    """
+    一个兼容 SSH 终端的键盘监听器，替换 LeRobot 的图形化 KeyboardTeleop。
+    """
+    def __init__(self):
+        self.keys = {}
+        self.running = False
+        self.thread = None
+        self.settings = termios.tcgetattr(sys.stdin)
+
+    def connect(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._listen, daemon=True)
+        self.thread.start()
+        print("[SSHKeyboard] Keyboard listener started. Control via SSH terminal.")
+
+    def disconnect(self):
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1.0)
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
+        print("[SSHKeyboard] Disconnected.")
+
+    def get_action(self):
+        # 返回当前按下的键，兼容 lerobot 的接口
+        # 注意：终端模式下通常只能检测到“刚刚按下”，很难检测“一直按住”
+        # 这里返回所有捕获到的键，读取后会清空（模拟按下事件）
+        active_keys = self.keys.copy()
+        self.keys.clear()  # 清除，防止一次按键被无限循环读取
+        return active_keys
+
+    def _listen(self):
+        try:
+            tty.setcbreak(sys.stdin.fileno())
+            while self.running:
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    key = sys.stdin.read(1)
+                    if key:
+                        self.keys[key] = True
+                        # 特殊处理：如果是 ctrl+c，强制退出
+                        if key == '\x03':
+                            self.running = False
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
+
+from lerobot.robots.xlerobot_2wheels import XLerobot2WheelsClient, XLerobot2WheelsClientConfig, XLerobot2WheelsConfig, XLerobot3Wheels
+# from lerobot.utils.robot_utils import busy_wait
+# from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+import rerun as rr  # <--- 新增这行
+from lerobot.utils.visualization_utils import log_rerun_data
 from lerobot.model.SO101Robot import SO101Kinematics
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
 
@@ -386,95 +441,78 @@ class SimpleTeleopArm:
 
 
 class SmoothBaseController:
-    """Simplified smooth base controller with acceleration/deceleration"""
-    
+    """
+    [修改版] 支持全向移动 (X, Y, Theta)
+    j: 左移 (y+)
+    l: 右移 (y-)
+    i: 前进 (x+)
+    k: 后退 (x-)
+    u: 左转 (theta+)
+    o: 右转 (theta-)
+    """
+
     def __init__(self):
         self.current_speed = 0.0
         self.last_time = time.time()
-        self.last_direction = {"x.vel": 0.0, "theta.vel": 0.0}
+        self.last_direction = {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
         self.is_moving = False
-    
+
     def update(self, pressed_keys, robot):
-        """Update smooth control and return base action"""
         current_time = time.time()
         dt = current_time - self.last_time
         self.last_time = current_time
-        
-        # Check if any base keys are pressed
-        base_keys = [
-            robot.teleop_keys['forward'],
-            robot.teleop_keys['backward'], 
-            robot.teleop_keys['rotate_left'],
-            robot.teleop_keys['rotate_right']
-        ]
-        any_key_pressed = any(key in pressed_keys for key in base_keys)
-        
-        # Calculate base action directly (bypass robot's built-in speed control)
-        base_action = {"x.vel": 0.0, "theta.vel": 0.0}
-        
+
+        # 定义所有控制键
+        # 注意：这里硬编码了按键，以确保你的需求生效
+        # j/l 可能不在 robot.teleop_keys 配置里，所以我们手动添加
+        move_keys = ['i', 'k', 'u', 'o', 'j', 'l']
+
+        any_key_pressed = any(k in pressed_keys for k in move_keys)
+
+        # 初始化动作
+        base_action = {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
+
         if any_key_pressed:
-            # Keys pressed - calculate direction and accelerate
             if not self.is_moving:
                 self.is_moving = True
-                print("[BASE] Starting acceleration")
-            
-            # Get current speed level from robot
+
+            # 获取速度档位
             speed_setting = robot.speed_levels[robot.speed_index]
-            linear_speed = speed_setting["linear"]  # e.g. 0.1, 0.2, or 0.3
-            angular_speed = speed_setting["angular"]  # e.g. 30, 60, or 90
-            
-            # Calculate direction based on pressed keys
-            if robot.teleop_keys["forward"] in pressed_keys:
-                base_action["x.vel"] += linear_speed
-            if robot.teleop_keys["backward"] in pressed_keys:
-                base_action["x.vel"] -= linear_speed
-            if robot.teleop_keys["rotate_left"] in pressed_keys:
-                base_action["theta.vel"] += angular_speed
-            if robot.teleop_keys["rotate_right"] in pressed_keys:
-                base_action["theta.vel"] -= angular_speed
-            
-            # Store current direction for deceleration
+            lin_speed = speed_setting["linear"]
+            ang_speed = speed_setting["angular"]
+
+            # === 核心按键映射 ===
+            # X轴 (前后)
+            if 'i' in pressed_keys: base_action["x.vel"] += lin_speed
+            if 'k' in pressed_keys: base_action["x.vel"] -= lin_speed
+
+            # Y轴 (左右横移)
+            if 'j' in pressed_keys: base_action["y.vel"] += lin_speed  # 左
+            if 'l' in pressed_keys: base_action["y.vel"] -= lin_speed  # 右
+
+            # Theta轴 (旋转)
+            if 'u' in pressed_keys: base_action["theta.vel"] += ang_speed
+            if 'o' in pressed_keys: base_action["theta.vel"] -= ang_speed
+
+            # 记录方向用于减速
             self.last_direction = base_action.copy()
-            
-            # Accelerate
-            self.current_speed += BASE_ACCELERATION_RATE * dt
-            self.current_speed = min(self.current_speed, BASE_MAX_SPEED)
-                
+
+            # 加速逻辑 (直接给满速，避免SSH延迟问题)
+            self.current_speed = 1.0
+
         else:
-            # No keys pressed - decelerate
             if self.is_moving:
                 self.is_moving = False
-                print("[BASE] Starting deceleration")
-            
-            # Use last direction for deceleration
-            if self.current_speed > 0.01 and self.last_direction:
-                base_action = self.last_direction.copy()
-            
-            # Decelerate
-            self.current_speed -= BASE_DECELERATION_RATE * dt
-            self.current_speed = max(self.current_speed, 0.0)
-        
-        # Apply speed multiplier
-        if base_action:
-            for key in base_action:
-                if 'vel' in key:
-                    original_value = base_action[key]
-                    base_action[key] *= self.current_speed
-                    
-                    # Ensure minimum velocity during deceleration to prevent motor cutoff
-                    if self.current_speed > 0.01 and abs(base_action[key]) < MIN_VELOCITY_THRESHOLD:
-                        # During deceleration, maintain minimum velocity to keep motors moving
-                        base_action[key] = MIN_VELOCITY_THRESHOLD if original_value > 0 else -MIN_VELOCITY_THRESHOLD
-        
-        # Debug output
-        if any_key_pressed:
-            print(f"[BASE] ACCEL: Speed={self.current_speed:.2f}, Action={base_action}")
-        elif self.current_speed > 0.01:
-            print(f"[BASE] DECEL: Speed={self.current_speed:.2f}, Action={base_action}")
-        elif self.current_speed <= 0.01:
-            print(f"[BASE] STOPPED: Speed={self.current_speed:.2f}")
-        
-        return base_action
+            self.current_speed = 0.0
+
+        # 应用速度系数
+        final_action = {
+            "x.vel": base_action["x.vel"] * self.current_speed,
+            "y.vel": base_action["y.vel"] * self.current_speed,
+            "theta.vel": base_action["theta.vel"] * self.current_speed
+        }
+
+        return final_action
 
 
 # Global smooth controller instance
@@ -494,8 +532,19 @@ def main():
     # robot = XLerobot2WheelsClient(robot_config)    
 
     # For local/wired connection
-    robot_config = XLerobot2WheelsConfig(id=robot_name)
-    robot = XLerobot2Wheels(robot_config)
+    # robot_config = XLerobot2WheelsConfig(id=robot_name)
+    # robot = XLerobot2Wheels(robot_config)
+    # For local/wired connection
+    # 根据之前的测试结果：ACM0 是右手+轮子，ACM1 是左手+头
+    robot_config = XLerobot2WheelsConfig(
+        id=robot_name,
+        # 左手 + 头 (刚才拔掉显示是 ACM2)
+        port1='/dev/ttyACM2',
+
+        # 右手 + 底盘 (刚才拔掉显示是 ACM0)
+        port2='/dev/ttyACM0'
+    )
+    robot = XLerobot3Wheels(robot_config)
     
     try:
         robot.connect()
@@ -506,11 +555,19 @@ def main():
         print(robot)
         return
         
-    init_rerun(session_name="xlerobot_2wheels_teleop")
+    # init_rerun(session_name="xlerobot_2wheels_teleop")
+    # init_rerun(session_name="xlerobot_2wheels_teleop", spawn_local_viewer=False)
+
+    # 使用原生 rerun 初始化，并启动 web 服务而不是本地窗口
+    # rr.init("xlerobot_2wheels_teleop")
+    # open_browser=False 防止它在 SSH 端尝试打开浏览器
+    # 启动后，你可以在电脑浏览器访问 http://<Jetson的IP>:9090 来查看可视化
+    # rr.serve(open_browser=False)
 
     #Init the keyboard instance
-    keyboard_config = KeyboardTeleopConfig()
-    keyboard = KeyboardTeleop(keyboard_config)
+    # keyboard_config = KeyboardTeleopConfig()
+    # keyboard = KeyboardTeleop(keyboard_config)
+    keyboard = SSHKeyboard()
     keyboard.connect()
 
     # Init the arm and head instances
@@ -589,7 +646,11 @@ def main():
 
     try:
         while True:
-            pressed_keys = set(keyboard.get_action().keys())
+            # pressed_keys = set(keyboard.get_action().keys())
+            pressed_keys_dict = keyboard.get_action()
+            pressed_keys = set(pressed_keys_dict.keys())
+            if pressed_keys:
+                print(f"Detected keys: {pressed_keys}")
             left_key_state = {action: (key in pressed_keys) for action, key in LEFT_KEYMAP.items()}
             right_key_state = {action: (key in pressed_keys) for action, key in RIGHT_KEYMAP.items()}
 
@@ -636,8 +697,9 @@ def main():
 
             obs = robot.get_observation()
             # print(f"[MAIN] Observation: {obs}")
-            log_rerun_data(obs, action)
+            # log_rerun_data(obs, action)
             # busy_wait(1.0 / FPS)
+            time.sleep(1.0 / FPS)
     finally:
         robot.disconnect()
         keyboard.disconnect()

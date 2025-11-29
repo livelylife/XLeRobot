@@ -20,7 +20,7 @@ from .config_xlerobot_2wheels import (
     XLerobot2WheelsClientConfig,
     XLerobot2WheelsHostConfig,
 )
-
+from .xlerobot_3wheels import XLerobot3Wheels
 __all__ = [
     "XLerobot2Wheels",
     "XLerobot2WheelsClient", 
@@ -28,4 +28,5 @@ __all__ = [
     "XLerobot2WheelsConfig",
     "XLerobot2WheelsClientConfig",
     "XLerobot2WheelsHostConfig",
+    "XLerobot3Wheels"
 ]
