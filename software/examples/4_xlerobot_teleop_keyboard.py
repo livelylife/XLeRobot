@@ -1,39 +1,21 @@
-# To Run on the host
-'''python
-PYTHONPATH=src python -m lerobot.robots.xlerobot.xlerobot_host --robot.id=my_xlerobot
-'''
-
-# To Run the teleop:
-'''python
-PYTHONPATH=src python -m examples.xlerobot.teleoperate_Keyboard
-'''
-
 import time
-import numpy as np
-import math
-import argparse
 import sys
 import threading
 import termios
 import tty
 import select
+import math
+import argparse
+import numpy as np
 
-# 确保能找到 lerobot 库
-# sys.path.insert(0, "/home/joyandai/workspace/lerobot/src") # 如果需要，取消注释这行
+sys.path.insert(0, "/home/joyandai/workspace/lerobot/src")
 
-# Comment the following line when used locally
-# from lerobot.robots.xlerobot import XLerobotClient, XLerobotConfigClient
-from lerobot.robots.xlerobot import XLerobotConfig, XLerobot
-from lerobot.utils.robot_utils import busy_wait
-# 禁用 Rerun 初始化，防止 SSH 报错，只导入 log_rerun_data
-from lerobot.utils.visualization_utils import log_rerun_data
+from lerobot.robots.xlerobot.xlerobot import XLerobot
+from lerobot.robots.xlerobot.config_xlerobot import XLerobotConfig
 from lerobot.model.SO101Robot import SO101Kinematics
 
 
-# 替换掉原有的 KeyboardTeleop，使用我们要定义的 SSHKeyboard
-# from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
-
-# === SSH 键盘监听类 (新增) ===
+# === SSH 键盘监听类 (支持长按) ===
 class SSHKeyboard:
     def __init__(self):
         self.keys = {}
@@ -45,128 +27,55 @@ class SSHKeyboard:
         self.running = True
         self.thread = threading.Thread(target=self._listen, daemon=True)
         self.thread.start()
-        print("\n[SSHKeyboard] 监听已启动。")
 
     def disconnect(self):
         self.running = False
-        if self.thread:
-            self.thread.join(timeout=1.0)
+        if self.thread: self.thread.join(timeout=1.0)
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
 
-    def get_action(self):
-        # 返回当前按下的键
-        active_keys = self.keys.copy()
-        self.keys.clear()
-        return active_keys
+    def get_pressed_keys(self):
+        return set(self.keys.keys())
 
     def _listen(self):
         try:
             tty.setcbreak(sys.stdin.fileno())
             while self.running:
-                if select.select([sys.stdin], [], [], 0.1)[0]:
+                # Read keys with a short timeout to detect key releases
+                if select.select([sys.stdin], [], [], 0.05)[0]:
                     key = sys.stdin.read(1)
-                    if key:
-                        self.keys[key] = True
-                        if key == '\x03':  # Ctrl+C
-                            self.running = False
+                    if key: self.keys[key] = True
+                else:  # No key pressed in the last 50ms, clear all keys
+                    self.keys.clear()
         finally:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
 
 
-# Keymaps (semantic action: key)
-LEFT_KEYMAP = {
-    'shoulder_pan+': 'e', 'shoulder_pan-': 'q',
-    'wrist_roll+': 'r', 'wrist_roll-': 'f',
-    'gripper+': 't', 'gripper-': 'g',
-    'x+': 'w', 'x-': 's', 'y+': 'a', 'y-': 'd',
-    'pitch+': 'z', 'pitch-': 'x',
-    'reset': 'c',
-    # For head motors
-    "head_motor_1+": "<", "head_motor_1-": ">",
-    "head_motor_2+": ",", "head_motor_2-": ".",
-
-    'triangle': 'y',  # Rectangle trajectory key
-}
-RIGHT_KEYMAP = {
-    'shoulder_pan+': '9', 'shoulder_pan-': '7',
-    'wrist_roll+': '/', 'wrist_roll-': '*',
-    'gripper+': '+', 'gripper-': '-',
-    'x+': '8', 'x-': '2', 'y+': '4', 'y-': '6',
-    'pitch+': '1', 'pitch-': '3',
-    'reset': '0',
-
-    'triangle': 'Y',  # Rectangle trajectory key
-}
-
-LEFT_JOINT_MAP = {
-    "shoulder_pan": "left_arm_shoulder_pan",
-    "shoulder_lift": "left_arm_shoulder_lift",
-    "elbow_flex": "left_arm_elbow_flex",
-    "wrist_flex": "left_arm_wrist_flex",
-    "wrist_roll": "left_arm_wrist_roll",
-    "gripper": "left_arm_gripper",
-}
-RIGHT_JOINT_MAP = {
-    "shoulder_pan": "right_arm_shoulder_pan",
-    "shoulder_lift": "right_arm_shoulder_lift",
-    "elbow_flex": "right_arm_elbow_flex",
-    "wrist_flex": "right_arm_wrist_flex",
-    "wrist_roll": "right_arm_wrist_roll",
-    "gripper": "right_arm_gripper",
-}
-
-# Head motor mapping
-HEAD_MOTOR_MAP = {
-    "head_motor_1": "head_motor_1",
-    "head_motor_2": "head_motor_2",
-}
-
-
-class RectangularTrajectory:
-    def __init__(self, width=0.06, height=0.06, segment_duration=0.91):
-        self.width = width
-        self.height = height
-        self.segment_duration = segment_duration
-        self.total_duration = 4 * segment_duration
-
-    def get_trajectory_point(self, current_x, current_y, t):
-        segment = int(t / self.segment_duration)
-        segment_t = t % self.segment_duration
-        normalized_t = segment_t / self.segment_duration
-        smooth_t = 0.5 * (1 - math.cos(math.pi * normalized_t))
-
-        corners = [
-            (current_x, current_y),  # Start (bottom-left)
-            (current_x + self.width, current_y),  # Bottom-right
-            (current_x + self.width, current_y + self.height),  # Top-right
-            (current_x, current_y + self.height),  # Top-left
-            (current_x, current_y)  # Back to start
-        ]
-
-        segment = max(0, min(3, segment))
-        start_corner = corners[segment]
-        end_corner = corners[segment + 1]
-
-        target_x = start_corner[0] + smooth_t * (end_corner[0] - start_corner[0])
-        target_y = start_corner[1] + smooth_t * (end_corner[1] - start_corner[1])
-
-        return target_x, target_y
+# === Keymaps, Arm and Head Control Classes ===
+LEFT_KEYMAP = {'shoulder_pan+': 'e', 'shoulder_pan-': 'q', 'wrist_roll+': 'r', 'wrist_roll-': 'f', 'gripper+': 't',
+               'gripper-': 'g', 'x+': 'w', 'x-': 's', 'y+': 'a', 'y-': 'd', 'pitch+': 'z', 'pitch-': 'x', 'reset': 'c',
+               "head_motor_1+": "<", "head_motor_1-": ">", "head_motor_2+": ",", "head_motor_2-": ".", 'triangle': 'y'}
+RIGHT_KEYMAP = {'shoulder_pan+': '9', 'shoulder_pan-': '7', 'wrist_roll+': '/', 'wrist_roll-': '*', 'gripper+': '+',
+                'gripper-': '-', 'x+': '8', 'x-': '2', 'y+': '4', 'y-': '6', 'pitch+': '1', 'pitch-': '3', 'reset': '0',
+                'triangle': 'Y'}
+LEFT_JOINT_MAP = {"shoulder_pan": "left_arm_shoulder_pan", "shoulder_lift": "left_arm_shoulder_lift",
+                  "elbow_flex": "left_arm_elbow_flex", "wrist_flex": "left_arm_wrist_flex",
+                  "wrist_roll": "left_arm_wrist_roll", "gripper": "left_arm_gripper"}
+RIGHT_JOINT_MAP = {"shoulder_pan": "right_arm_shoulder_pan", "shoulder_lift": "right_arm_shoulder_lift",
+                   "elbow_flex": "right_arm_elbow_flex", "wrist_flex": "right_arm_wrist_flex",
+                   "wrist_roll": "right_arm_wrist_roll", "gripper": "right_arm_gripper"}
+HEAD_MOTOR_MAP = {"head_motor_1": "head_motor_1", "head_motor_2": "head_motor_2"}
 
 
 class SimpleHeadControl:
     def __init__(self, initial_obs, kp=0.81):
-        self.kp = kp
+        self.kp = kp;
         self.degree_step = 1
-        self.target_positions = {
-            "head_motor_1": initial_obs.get("head_motor_1.pos", 0.0),
-            "head_motor_2": initial_obs.get("head_motor_2.pos", 0.0),
-        }
+        self.target_positions = {"head_motor_1": initial_obs.get("head_motor_1.pos", 0.0),
+                                 "head_motor_2": initial_obs.get("head_motor_2.pos", 0.0)}
         self.zero_pos = {"head_motor_1": 0.0, "head_motor_2": 0.0}
 
     def move_to_zero_position(self, robot):
-        self.target_positions = self.zero_pos.copy()
-        action = self.p_control_action(robot)
-        robot.send_action(action)
+        self.target_positions = self.zero_pos.copy(); robot.send_action(self.p_control_action(robot))
 
     def handle_keys(self, key_state):
         if key_state.get('head_motor_1+'): self.target_positions["head_motor_1"] += self.degree_step
@@ -175,90 +84,29 @@ class SimpleHeadControl:
         if key_state.get('head_motor_2-'): self.target_positions["head_motor_2"] -= self.degree_step
 
     def p_control_action(self, robot):
-        obs = robot.get_observation()
+        obs = robot.get_observation();
         action = {}
         for motor in self.target_positions:
-            current = obs.get(f"{HEAD_MOTOR_MAP[motor]}.pos", 0.0)
+            current = obs.get(f"{HEAD_MOTOR_MAP[motor]}.pos", 0.0);
             error = self.target_positions[motor] - current
-            control = self.kp * error
-            action[f"{HEAD_MOTOR_MAP[motor]}.pos"] = current + control
+            action[f"{HEAD_MOTOR_MAP[motor]}.pos"] = current + self.kp * error
         return action
 
 
 class SimpleTeleopArm:
     def __init__(self, kinematics, joint_map, initial_obs, prefix="left", kp=0.81):
-        self.kinematics = kinematics
-        self.joint_map = joint_map
-        self.prefix = prefix
-        self.kp = kp
-        self.joint_positions = {
-            "shoulder_pan": initial_obs[f"{prefix}_arm_shoulder_pan.pos"],
-            "shoulder_lift": initial_obs[f"{prefix}_arm_shoulder_lift.pos"],
-            "elbow_flex": initial_obs[f"{prefix}_arm_elbow_flex.pos"],
-            "wrist_flex": initial_obs[f"{prefix}_arm_wrist_flex.pos"],
-            "wrist_roll": initial_obs[f"{prefix}_arm_wrist_roll.pos"],
-            "gripper": initial_obs[f"{prefix}_arm_gripper.pos"],
-        }
-        self.current_x = 0.1629
-        self.current_y = 0.1131
-        self.pitch = 0.0
-        self.degree_step = 1
-        self.xy_step = 0.0021
+        self.kinematics, self.joint_map, self.prefix, self.kp = kinematics, joint_map, prefix, kp
+        self.joint_positions = {j.replace(f"{prefix}_arm_", ""): initial_obs[f"{j}.pos"] for j in joint_map.values()}
+        self.current_x, self.current_y, self.pitch = 0.1629, 0.1131, 0.0
+        self.degree_step, self.xy_step = 1, 0.0021
         self.target_positions = {k: 0.0 for k in self.joint_positions}
-        self.zero_pos = {k: 0.0 for k in self.joint_positions}
-
-        self.rectangular_trajectory = RectangularTrajectory(
-            width=0.06, height=0.06, segment_duration=1.01
-        )
+        self.zero_pos = self.target_positions.copy()
 
     def move_to_zero_position(self, robot):
-        self.target_positions = self.zero_pos.copy()
-        self.current_x = 0.1629
-        self.current_y = 0.1131
-        self.pitch = 0.0
-        self.target_positions["wrist_flex"] = 0.0
-        action = self.p_control_action(robot)
-        robot.send_action(action)
-
-    def execute_rectangular_trajectory(self, robot, fps=30):
-        print(f"[{self.prefix}] Starting rectangular trajectory...")
-        start_x = self.current_x
-        start_y = self.current_y
-        start_time = time.time()
-
-        while True:
-            elapsed_time = time.time() - start_time
-            if elapsed_time >= self.rectangular_trajectory.total_duration:
-                break
-
-            target_x, target_y = self.rectangular_trajectory.get_trajectory_point(
-                start_x, start_y, elapsed_time
-            )
-            self.current_x = target_x
-            self.current_y = target_y
-
-            try:
-                joint2, joint3 = self.kinematics.inverse_kinematics(self.current_x, self.current_y)
-                self.target_positions["shoulder_lift"] = joint2
-                self.target_positions["elbow_flex"] = joint3
-                self.target_positions["wrist_flex"] = (
-                        -self.target_positions["shoulder_lift"]
-                        - self.target_positions["elbow_flex"]
-                        + self.pitch
-                )
-
-                action = self.p_control_action(robot)
-                if self.prefix == "left":
-                    robot_action = {**action, **{}, **{}, **{}}
-                elif self.prefix == "right":
-                    robot_action = {**{}, **action, **{}, **{}}
-
-                robot.send_action(robot_action)
-                time.sleep(1.0 / fps)
-
-            except Exception as e:
-                print(f"[{self.prefix}] IK failed: {e}")
-                break
+        self.target_positions = self.zero_pos.copy();
+        self.current_x, self.current_y, self.pitch = 0.1629, 0.1131, 0.0
+        self.target_positions["wrist_flex"] = 0.0;
+        robot.send_action(self.p_control_action(robot))
 
     def handle_keys(self, key_state):
         if key_state.get('shoulder_pan+'): self.target_positions["shoulder_pan"] += self.degree_step
@@ -269,84 +117,54 @@ class SimpleTeleopArm:
         if key_state.get('gripper-'): self.target_positions["gripper"] -= self.degree_step
         if key_state.get('pitch+'): self.pitch += self.degree_step
         if key_state.get('pitch-'): self.pitch -= self.degree_step
-
         moved = False
         if key_state.get('x+'): self.current_x += self.xy_step; moved = True
         if key_state.get('x-'): self.current_x -= self.xy_step; moved = True
         if key_state.get('y+'): self.current_y += self.xy_step; moved = True
         if key_state.get('y-'): self.current_y -= self.xy_step; moved = True
-
         if moved:
             try:
-                joint2, joint3 = self.kinematics.inverse_kinematics(self.current_x, self.current_y)
-                self.target_positions["shoulder_lift"] = joint2
-                self.target_positions["elbow_flex"] = joint3
+                j2, j3 = self.kinematics.inverse_kinematics(self.current_x, self.current_y)
+                self.target_positions["shoulder_lift"], self.target_positions["elbow_flex"] = j2, j3
             except:
                 pass
-
-        self.target_positions["wrist_flex"] = (
-                -self.target_positions["shoulder_lift"]
-                - self.target_positions["elbow_flex"]
-                + self.pitch
-        )
+        self.target_positions["wrist_flex"] = -self.target_positions["shoulder_lift"] - self.target_positions[
+            "elbow_flex"] + self.pitch
 
     def p_control_action(self, robot):
-        obs = robot.get_observation()
-        current = {j: obs[f"{self.prefix}_arm_{j}.pos"] for j in self.joint_map}
-        action = {}
-        for j in self.target_positions:
-            error = self.target_positions[j] - current[j]
-            control = self.kp * error
-            action[f"{self.joint_map[j]}.pos"] = current[j] + control
+        obs, action = robot.get_observation(), {}
+        for j_name, j_map in self.joint_map.items():
+            error = self.target_positions[j_name] - obs[f"{j_map}.pos"]
+            action[f"{j_map}.pos"] = obs[f"{j_map}.pos"] + self.kp * error
         return action
 
 
-def main(robot_id=None):
-    # Teleop parameters
-    FPS = 30
-    robot_name = "my_xlerobot_lab"
-
-    # === 1. 强制端口配置 ===
-    # Port 1: Left + Head (ACM2 - 拔插测试结果)
-    # Port 2: Right + Base (ACM0 - 拔插测试结果)
-    robot_config = XLerobotConfig(
-        id=robot_name,
-        port1='/dev/ttyACM2',
-        port2='/dev/ttyACM0',
-    )
-
-    print("正在连接机器人 (三轮全向模式)...")
-    try:
-        # calibrate=False 跳过物理校准
-        robot = XLerobot(robot_config)
-        robot.connect(calibrate=False)
-        print("✅ 连接成功！")
-    except Exception as e:
-        print(f"❌ 连接失败: {e}")
-        return
-
-    # init_rerun(session_name="xlerobot_teleop_v2") # 禁用 Rerun
-
-    # 使用 SSH 键盘替代原有的 KeyboardTeleop
-    keyboard = SSHKeyboard()
-    keyboard.connect()
-
-    # Init the arm and head instances
-    obs = robot.get_observation()
-    kin_left = SO101Kinematics()
-    kin_right = SO101Kinematics()
-    left_arm = SimpleTeleopArm(kin_left, LEFT_JOINT_MAP, obs, prefix="left")
-    right_arm = SimpleTeleopArm(kin_right, RIGHT_JOINT_MAP, obs, prefix="right")
-    head_control = SimpleHeadControl(obs)
-
-    # Move both arms and head to zero position at start
-    left_arm.move_to_zero_position(robot)
-    right_arm.move_to_zero_position(robot)
-
-    # Print comprehensive keymap information based on robot config
-    print("\n" + "=" * 80)
-    print("🤖 XLeRobot 2Wheels Keyboard Control Keymap")
-    print("=" * 80)
+def print_robot_status(robot):
+    print("\n" + "=" * 50 + "\n      🤖 机器人硬件状态报告 🤖\n" + "=" * 50)
+    config = robot.config
+    print(f"\n--- Port {config.port1} (Bus 1) ---")
+    if config.enable_left_arm:
+        print(
+            f"  - 左臂:  配置启用 -> {'✅ 已连接' if robot.left_arm_motors and robot.bus1 and robot.bus1.is_connected else '❌ 未检测到'}")
+    else:
+        print("  - 左臂:  配置禁用")
+    if config.enable_head:
+        print(
+            f"  - 头部:  配置启用 -> {'✅ 已连接' if robot.head_motors and robot.bus1 and robot.bus1.is_connected else '❌ 未检测到'}")
+    else:
+        print("  - 头部:  配置禁用")
+    print(f"\n--- Port {config.port2} (Bus 2) ---")
+    if config.enable_right_arm:
+        print(
+            f"  - 右臂: 配置启用 -> {'✅ 已连接' if robot.right_arm_motors and robot.bus2 and robot.bus2.is_connected else '❌ 未检测到'}")
+    else:
+        print("  - 右臂: 配置禁用")
+    if config.enable_base:
+        print(
+            f"  - 底盘:  配置启用 -> {'✅ 已连接' if robot.base_motors and robot.bus2 and robot.bus2.is_connected else '❌ 未检测到'}")
+    else:
+        print("  - 底盘:  配置禁用")
+    print("=" * 50 + "\n")
 
     print("\n📱 Base Control (Differential Drive):")
     print(f"    {robot.teleop_keys['forward']}: Forward")
@@ -358,112 +176,138 @@ def main(robot_id=None):
     print(f"    {robot.teleop_keys['quit']}: Quit")
     print("    🚀 Smooth Control: Linear acceleration when holding, linear deceleration when released")
 
-    print("\n🦾 Left Arm Control:")
-    print("   Joint Control:")
-    print(f"    Q/E: Shoulder Pan +/- (shoulder_pan)")
-    print(f"    R/F: Wrist Roll +/- (wrist_roll)")
-    print(f"    T/G: Gripper +/- (gripper)")
-    print(f"    Z/X: Pitch +/- (pitch)")
-    print("   Position Control:")
-    print(f"    W/S: X-axis +/- (x movement)")
-    print(f"    A/D: Y-axis +/- (y movement)")
-    print("   Special Functions:")
-    print(f"    C: Reset to zero position")
-    print(f"    Y: Execute rectangular trajectory")
 
-    print("\n🦾 Right Arm Control:")
-    print("   Joint Control:")
-    print(f"    7/9: Shoulder Pan +/- (shoulder_pan)")
-    print(f"    /*: Wrist Roll +/- (wrist_roll)")
-    print(f"    +/-: Gripper +/- (gripper)")
-    print(f"    1/3: Pitch +/- (pitch)")
-    print("   Position Control:")
-    print(f"    8/2: X-axis +/- (x movement)")
-    print(f"    4/6: Y-axis +/- (y movement)")
-    print("   Special Functions:")
-    print(f"    0: Reset to zero position")
-    print(f"    Y: Execute rectangular trajectory")
+    if config.enable_head and robot.head_motors:
+        print("\n👁️ Head Control:")
+        print(f"    </>: Head Motor 1 +/- (head_motor_1)")
+        print(f"    ,/.: Head Motor 2 +/- (head_motor_2)")
+        print(f"    ?: Head reset to zero position")
 
-    print("\n👁️ Head Control:")
-    print(f"    </>: Head Motor 1 +/- (head_motor_1)")
-    print(f"    ,/.: Head Motor 2 +/- (head_motor_2)")
-    print(f"    ?: Head reset to zero position")
+    if config.enable_left_arm and robot.left_arm_motors:
+        print("\n🦾 Left Arm Control:")
+        print("   Joint Control:")
+        print(f"    Q/E: Shoulder Pan +/- (shoulder_pan)")
+        print(f"    R/F: Wrist Roll +/- (wrist_roll)")
+        print(f"    T/G: Gripper +/- (gripper)")
+        print(f"    Z/X: Pitch +/- (pitch)")
+        print("   Position Control:")
+        print(f"    W/S: X-axis +/- (x movement)")
+        print(f"    A/D: Y-axis +/- (y movement)")
+        print("   Special Functions:")
+        print(f"    C: Reset to zero position")
+        print(f"    Y: Execute rectangular trajectory")
 
-    print("\n" + "=" * 80)
+    if config.enable_right_arm and robot.right_arm_motors:
+        print("\n🦾 Right Arm Control:")
+        print("   Joint Control:")
+        print(f"    7/9: Shoulder Pan +/- (shoulder_pan)")
+        print(f"    /*: Wrist Roll +/- (wrist_roll)")
+        print(f"    +/-: Gripper +/- (gripper)")
+        print(f"    1/3: Pitch +/- (pitch)")
+        print("   Position Control:")
+        print(f"    8/2: X-axis +/- (x movement)")
+        print(f"    4/6: Y-axis +/- (y movement)")
+        print("   Special Functions:")
+        print(f"    0: Reset to zero position")
+        print(f"    Y: Execute rectangular trajectory")
+
+    if config.enable_base and robot.base_motors:
+        print("\n🛞 Base Control (Omni-directional):")
+        print("   Movement:")
+        print(f"    i: 前进 (Forward)")
+        print(f"    k: 后退 (Backward)")
+        print(f"    j: 左移 (Strafe Left)")
+        print(f"    l: 右移 (Strafe Right)")
+        print("   Rotation:")
+        print(f"    u: 逆时针旋转 (Rotate CCW)")
+        print(f"    o: 顺时针旋转 (Rotate CW)")
+        print("   Speed Control:")
+        print(f"    n: 加速 (Speed Up)")
+        print(f"    m: 减速 (Speed Down)")
+        print("   Special Functions:")
+        print(f"    b: 停止并退出 (Quit)")
+
+
+    print("\n" + "=" * 50)
     print("🎮 Control started! Use above keys to control robot")
     print("=" * 80 + "\n")
 
+
+def main(robot_id=None):
+    FPS = 20
+    robot_config = XLerobotConfig(
+        id=robot_id or "my_xlerobot_lab",
+        port1='/dev/ttyACM0',
+        port2='/dev/ttyACM1',
+        enable_left_arm=False,
+        enable_right_arm=True,
+        enable_head=False,
+        enable_base=True,
+    )
+
+    print("正在连接机器人 (可选择性连接)...")
+    try:
+        robot = XLerobot(robot_config)
+        robot.connect(calibrate=False)
+        print("✅ 连接成功！")
+        print_robot_status(robot)
+    except Exception as e:
+        print(f"❌ 连接失败: {e}")
+        return
+
+    keyboard = SSHKeyboard()
+    keyboard.connect()
+
+    obs = robot.get_observation()
+    if robot_config.enable_left_arm: left_arm = SimpleTeleopArm(SO101Kinematics(), LEFT_JOINT_MAP, obs, "left")
+    if robot_config.enable_right_arm: right_arm = SimpleTeleopArm(SO101Kinematics(), RIGHT_JOINT_MAP, obs, "right")
+    if robot_config.enable_head: head_control = SimpleHeadControl(obs)
+
+    print("🎮 控制已启动 (按 'b' 退出)...")
     try:
         while True:
-            # 获取 SSH 键盘按键
-            key_dict = keyboard.get_action()
-            pressed_keys = set(key_dict.keys())
+            pressed_keys = keyboard.get_pressed_keys()
 
-            # 手臂控制
-            left_key_state = {action: (key in pressed_keys) for action, key in LEFT_KEYMAP.items()}
-            right_key_state = {action: (key in pressed_keys) for action, key in RIGHT_KEYMAP.items()}
+            if robot.teleop_keys['quit'] in pressed_keys:
+                print("退出程序...")
+                break
 
-            if robot.teleop_keys['quit'] in pressed_keys: break  # 退出
+            action = {}
+            if robot.config.enable_left_arm or robot.config.enable_head:
+                left_key_state = {action: (key in pressed_keys) for action, key in LEFT_KEYMAP.items()}
+                if robot.config.enable_left_arm:
+                    if left_key_state.get('reset'): left_arm.move_to_zero_position(robot); continue
+                    left_arm.handle_keys(left_key_state);
+                    action.update(left_arm.p_control_action(robot))
+                if robot.config.enable_head:
+                    if '?' in pressed_keys: head_control.move_to_zero_position(robot); continue
+                    head_control.handle_keys(left_key_state);
+                    action.update(head_control.p_control_action(robot))
+            if robot.config.enable_right_arm:
+                right_key_state = {action: (key in pressed_keys) for action, key in RIGHT_KEYMAP.items()}
+                if right_key_state.get('reset'): right_arm.move_to_zero_position(robot); continue
+                right_arm.handle_keys(right_key_state);
+                action.update(right_arm.p_control_action(robot))
 
-            # Trajectory Handling
-            if left_key_state.get('triangle'):
-                left_arm.execute_rectangular_trajectory(robot, fps=FPS)
-                continue
-            if right_key_state.get('triangle'):
-                right_arm.execute_rectangular_trajectory(robot, fps=FPS)
-                continue
+            if robot.config.enable_base:
+                vx, vy, omega = 0.0, 0.0, 0.0
+                speed, rot_speed = 0.3, 60
+                if 'i' in pressed_keys: vx += speed
+                if 'k' in pressed_keys: vx -= speed
+                if 'j' in pressed_keys: vy += speed
+                if 'l' in pressed_keys: vy -= speed
+                if 'u' in pressed_keys: omega += rot_speed
+                if 'o' in pressed_keys: omega -= rot_speed
+                action.update({"x.vel": vx, "y.vel": vy, "theta.vel": omega})
 
-            # Reset Handling
-            if left_key_state.get('reset'):
-                left_arm.move_to_zero_position(robot)
-                continue
-            if right_key_state.get('reset'):
-                right_arm.move_to_zero_position(robot)
-                continue
-            if '?' in pressed_keys:
-                head_control.move_to_zero_position(robot)
-                continue
-
-            # Update Targets
-            left_arm.handle_keys(left_key_state)
-            right_arm.handle_keys(right_key_state)
-            head_control.handle_keys(left_key_state)
-
-            # Calculate Actions
-            left_action = left_arm.p_control_action(robot)
-            right_action = right_arm.p_control_action(robot)
-            head_action = head_control.p_control_action(robot)
-
-            # === Base Control (Omni) ===
-            # 将按键集合转换为 numpy 数组供 _from_keyboard_to_base_action 使用
-            # 注意：我们的 SSH 键盘返回的是单个字符，可能需要适配
-            # 为了简单，我们手动构建 base action
-            vx, vy, omega = 0.0, 0.0, 0.0
-            speed = 0.2
-            rot = 45
-
-            if 'i' in pressed_keys: vx += speed
-            if 'k' in pressed_keys: vx -= speed
-            if 'j' in pressed_keys: vy += speed
-            if 'l' in pressed_keys: vy -= speed
-            if 'u' in pressed_keys: omega += rot
-            if 'o' in pressed_keys: omega -= rot
-
-            base_action = {"x.vel": vx, "y.vel": vy, "theta.vel": omega}
-
-            # Combine and Send
-            action = {**left_action, **right_action, **head_action, **base_action}
             robot.send_action(action)
-
-            # obs = robot.get_observation()
-            # log_rerun_data(obs, action) # 禁用
-
             time.sleep(1.0 / FPS)
 
     finally:
+        print("正在断开连接...")
         robot.disconnect()
         keyboard.disconnect()
-        print("Teleoperation ended.")
+        print("已安全断开。")
 
 
 if __name__ == "__main__":

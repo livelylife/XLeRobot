@@ -40,7 +40,7 @@ def xlerobot_cameras_config() -> dict[str, CameraConfig]:
 @dataclass
 class XLerobotConfig(RobotConfig):
     
-    port1: str = "/dev/ttyACM2"  # port to connect to the bus (so101 + head camera)
+    port1: str = "/dev/ttyACM1"  # port to connect to the bus (so101 + head camera)
     port2: str = "/dev/ttyACM0"  # port to connect to the bus (same as lekiwi setup)
     disable_torque_on_disconnect: bool = True
     max_relative_target: int | None = None
@@ -62,6 +62,13 @@ class XLerobotConfig(RobotConfig):
             "quit": "b",
         }
     )
+
+    # === 功能开关 (新增) ===
+    # True = 启用, False = 禁用
+    enable_left_arm: bool = True
+    enable_right_arm: bool = True
+    enable_head: bool = True
+    enable_base: bool = True
 
 
 @dataclass
