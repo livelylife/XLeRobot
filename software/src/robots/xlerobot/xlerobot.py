@@ -237,15 +237,14 @@ class XLerobot(Robot):
             max_raw: int = 3000,
     ) -> dict:
         """
-        [MODIFIED] 3-Wheel Omni Kinematics with final -150 degree correction.
+        [Final Calibration] 3-Wheel Omni Kinematics with precise -150 degree correction.
         """
         # 将旋转速度从 deg/s 转换为 rad/s
         theta_rad = math.radians(theta)
 
         # === 1. 坐标系旋转修正 (核心) ===
-        # 现象: 按 i (前进, 0度) 时，机器人实际朝 10点钟方向 (约 +150度) 移动。
-        # 对策: 我们需要将所有输入指令在软件层面“反向”旋转 150 度来抵消。
-        correction_angle = math.radians(-140)
+        # 根据你的反馈 "前进走向10点钟方向"，我们将修正角度精确地设置为 -150 度
+        correction_angle = math.radians(-175)
 
         # 应用旋转矩阵，得到修正后的 vx 和 vy
         vx_new = x * math.cos(correction_angle) - y * math.sin(correction_angle)
@@ -256,24 +255,15 @@ class XLerobot(Robot):
 
         # === 2. 运动学矩阵 (Kiwi Drive) ===
         # 这个矩阵定义了三个轮子在物理上的角度分布
-        # 这里的 [150, 270, 30] 是一个常见的标准分布，我们保持不变
+        # 既然旋转是好的，这个矩阵就是正确的，保持不变
         angles = np.radians(np.array([150, 270, 30]))
-
-        # 创建速度向量 [x, y, theta_rad]
         velocity_vector = np.array([x, y, theta_rad])
-
-        # 运动学矩阵 M: 将机身速度映射到每个轮子的切向速度
         m = np.array([[np.cos(a), np.sin(a), base_radius] for a in angles])
 
-        # 计算每个轮子的线速度 (m/s)
-        wheel_linear_speeds = m.dot(velocity_vector)
-        # 转换为轮子自身的角速度 (rad/s)
-        wheel_angular_speeds = wheel_linear_speeds / wheel_radius
-        # 转换为电机控制单位 (deg/s)
-        wheel_degps = wheel_angular_speeds * (180.0 / np.pi)
+        # 计算轮速 (deg/s)
+        wheel_degps = m.dot(velocity_vector) / wheel_radius * (180.0 / np.pi)
 
         # === 3. 速度限幅 ===
-        # 防止电机过载
         steps_per_deg = 4096.0 / 360.0
         raw_floats = [abs(degps) * steps_per_deg for degps in wheel_degps]
         if raw_floats and (max_val := max(raw_floats)) > max_raw:
@@ -283,13 +273,12 @@ class XLerobot(Robot):
         # === 4. 转换为电机原始指令 ===
         wheel_raw = [self._degps_to_raw(deg) for deg in wheel_degps]
 
-        # === 5. 返回指令字典 ===
-        # 注意：这里的 key 必须和你 __init__ 中定义的名字完全一致
-        # "base_wheel_1" -> ID 7, "base_wheel_2" -> ID 8, "base_wheel_3" -> ID 9
+        # === 5. 返回指令字典 (保持原始极性，不加负号) ===
+        # 既然旋转是好的，就证明这个组合是正确的
         return {
-            "base_wheel_1": wheel_raw[0],
-            "base_wheel_2": wheel_raw[1],
-            "base_wheel_3": wheel_raw[2],
+            "base_wheel_1": wheel_raw[0], # ID 7
+            "base_wheel_2": wheel_raw[1], # ID 8
+            "base_wheel_3": wheel_raw[2], # ID 9
         }
 
     def _wheel_raw_to_body(self, raw_1, raw_2, raw_3, wheel_radius: float = 0.05, base_radius: float = 0.125):

@@ -237,10 +237,10 @@ def main(robot_id=None):
     FPS = 20
     robot_config = XLerobotConfig(
         id=robot_id or "my_xlerobot_lab",
-        port1='/dev/ttyACM0',
-        port2='/dev/ttyACM1',
+        port1='/dev/ttyACM1',
+        port2='/dev/ttyACM0',
         enable_left_arm=False,
-        enable_right_arm=True,
+        enable_right_arm=False,
         enable_head=False,
         enable_base=True,
     )
