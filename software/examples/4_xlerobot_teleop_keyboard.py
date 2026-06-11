@@ -8,7 +8,7 @@ import math
 import argparse
 import numpy as np
 
-sys.path.insert(0, "/home/joyandai/workspace/lerobot/src")
+sys.path.insert(0, "/home/wisx/workspace/lerobot/src")
 
 from lerobot.robots.xlerobot.xlerobot import XLerobot
 from lerobot.robots.xlerobot.config_xlerobot import XLerobotConfig
@@ -166,16 +166,6 @@ def print_robot_status(robot):
         print("  - 底盘:  配置禁用")
     print("=" * 50 + "\n")
 
-    print("\n📱 Base Control (Differential Drive):")
-    print(f"    {robot.teleop_keys['forward']}: Forward")
-    print(f"    {robot.teleop_keys['backward']}: Backward")
-    print(f"    {robot.teleop_keys['rotate_left']}: Rotate Left")
-    print(f"    {robot.teleop_keys['rotate_right']}: Rotate Right")
-    print(f"    {robot.teleop_keys['speed_up']}: Speed Up")
-    print(f"    {robot.teleop_keys['speed_down']}: Speed Down")
-    print(f"    {robot.teleop_keys['quit']}: Quit")
-    print("    🚀 Smooth Control: Linear acceleration when holding, linear deceleration when released")
-
 
     if config.enable_head and robot.head_motors:
         print("\n👁️ Head Control:")
@@ -249,7 +239,7 @@ def main(robot_id=None):
     try:
         robot = XLerobot(robot_config)
         robot.connect(calibrate=False)
-        print("✅ 连接成功！")
+        print(f"✅ 连接成功！port1={robot.config.port1} port2={robot.config.port2}")
         print_robot_status(robot)
     except Exception as e:
         print(f"❌ 连接失败: {e}")
@@ -291,7 +281,7 @@ def main(robot_id=None):
 
             if robot.config.enable_base:
                 vx, vy, omega = 0.0, 0.0, 0.0
-                speed, rot_speed = 0.3, 60
+                speed, rot_speed = 0.05, 20
                 if 'i' in pressed_keys: vx += speed
                 if 'k' in pressed_keys: vx -= speed
                 if 'j' in pressed_keys: vy += speed
