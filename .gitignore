@@ -97,6 +97,7 @@ lerna-debug.log*
 simulation/**/video_test_output*/
 simulation/**/test_output*.log
 software/**/test_output*.log
+software/outputs/odom/
 
 # Ignore web_control artefacts already covered locally
 web_control/client/node_modules/

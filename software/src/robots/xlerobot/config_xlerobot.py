@@ -63,6 +63,15 @@ class XLerobotConfig(RobotConfig):
         }
     )
 
+    # 3-wheel omni base parameters
+    wheel_radius: float = 0.05  # Wheel radius in meters
+    base_radius: float = 0.125  # Distance from robot center to each wheel in meters
+    base_correction_degrees: float = -175.0  # Empirical command-frame correction used by the base kinematics
+    odom_frame_id: str = "odom"
+    odom_child_frame_id: str = "base_link"
+    odom_linear_deadband: float = 0.003  # m/s; suppresses tiny stationary wheel-velocity noise
+    odom_angular_deadband_degps: float = 1.0  # deg/s; suppresses tiny stationary yaw-rate noise
+
     # === 功能开关 (新增) ===
     # True = 启用, False = 禁用
     enable_left_arm: bool = True

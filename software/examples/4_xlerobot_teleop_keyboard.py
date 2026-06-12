@@ -4,9 +4,10 @@ import threading
 import termios
 import tty
 import select
-import math
 import argparse
-import numpy as np
+import json
+from datetime import datetime
+from pathlib import Path
 
 sys.path.insert(0, "/home/wisx/workspace/lerobot/src")
 
@@ -223,7 +224,7 @@ def print_robot_status(robot):
     print("=" * 80 + "\n")
 
 
-def main(robot_id=None):
+def main(robot_id=None, odom_log_dir=None, odom_hz=20.0, odom_source="wheel"):
     FPS = 20
     robot_config = XLerobotConfig(
         id=robot_id or "my_xlerobot_lab",
@@ -245,16 +246,29 @@ def main(robot_id=None):
         print(f"❌ 连接失败: {e}")
         return
 
-    keyboard = SSHKeyboard()
-    keyboard.connect()
-
-    obs = robot.get_observation()
-    if robot_config.enable_left_arm: left_arm = SimpleTeleopArm(SO101Kinematics(), LEFT_JOINT_MAP, obs, "left")
-    if robot_config.enable_right_arm: right_arm = SimpleTeleopArm(SO101Kinematics(), RIGHT_JOINT_MAP, obs, "right")
-    if robot_config.enable_head: head_control = SimpleHeadControl(obs)
-
-    print("🎮 控制已启动 (按 'b' 退出)...")
+    keyboard = None
+    odom_file = None
+    odom_samples = 0
     try:
+        keyboard = SSHKeyboard()
+        keyboard.connect()
+
+        obs = robot.get_observation()
+        if robot_config.enable_left_arm: left_arm = SimpleTeleopArm(SO101Kinematics(), LEFT_JOINT_MAP, obs, "left")
+        if robot_config.enable_right_arm: right_arm = SimpleTeleopArm(SO101Kinematics(), RIGHT_JOINT_MAP, obs, "right")
+        if robot_config.enable_head: head_control = SimpleHeadControl(obs)
+
+        odom_period = 1.0 / odom_hz if odom_hz and odom_hz > 0 else None
+        next_odom_time = time.time()
+        if odom_period is not None:
+            log_dir = Path(odom_log_dir) if odom_log_dir else Path(__file__).resolve().parents[1] / "outputs" / "odom"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            odom_path = log_dir / f"xlerobot_odom_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+            odom_file = odom_path.open("w", encoding="utf-8")
+            robot.reset_odometry()
+            print(f"🧭 Odom logging enabled: {odom_path} ({odom_hz:.1f} Hz, source={odom_source})")
+
+        print("🎮 控制已启动 (按 'b' 退出)...")
         while True:
             pressed_keys = keyboard.get_pressed_keys()
 
@@ -291,17 +305,59 @@ def main(robot_id=None):
                 action.update({"x.vel": vx, "y.vel": vy, "theta.vel": omega})
 
             robot.send_action(action)
+
+            if odom_file is not None and time.time() >= next_odom_time:
+                now = time.time()
+                if odom_source == "command":
+                    obs = {
+                        "x.vel": action.get("x.vel", 0.0),
+                        "y.vel": action.get("y.vel", 0.0),
+                        "theta.vel": action.get("theta.vel", 0.0),
+                    }
+                    robot.last_base_velocity_source = "command"
+                else:
+                    obs = robot.get_observation()
+                odom_msg = robot.update_odometry(timestamp=now, observation=obs)
+                odom_msg["metadata"].update(
+                    {
+                        "command": {
+                            "x.vel": action.get("x.vel", 0.0),
+                            "y.vel": action.get("y.vel", 0.0),
+                            "theta.vel": action.get("theta.vel", 0.0),
+                        },
+                        "pressed_keys": sorted(pressed_keys),
+                    }
+                )
+                odom_file.write(json.dumps(odom_msg, ensure_ascii=False) + "\n")
+                odom_samples += 1
+                if odom_samples % 20 == 0:
+                    odom_file.flush()
+                next_odom_time = now + odom_period
+
             time.sleep(1.0 / FPS)
 
     finally:
         print("正在断开连接...")
+        if odom_file is not None:
+            odom_file.flush()
+            odom_file.close()
+            print(f"🧭 Odom saved: {odom_samples} samples")
         robot.disconnect()
-        keyboard.disconnect()
+        if keyboard is not None:
+            keyboard.disconnect()
         print("已安全断开。")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--robot_id", type=str)
+    parser.add_argument("--odom-log-dir", type=str, default=None, help="Directory for JSONL odometry logs")
+    parser.add_argument("--odom-hz", type=float, default=20.0, help="Odometry logging frequency; set <=0 to disable")
+    parser.add_argument(
+        "--odom-source",
+        choices=["wheel", "command"],
+        default="wheel",
+        help="Use wheel feedback or command velocity for odom integration",
+    )
     args = parser.parse_args()
-    main(args.robot_id)
+    main(args.robot_id, odom_log_dir=args.odom_log_dir, odom_hz=args.odom_hz, odom_source=args.odom_source)

@@ -19,7 +19,6 @@ import time
 from functools import cached_property
 from itertools import chain
 from typing import Any
-import math
 import numpy as np
 
 from lerobot.cameras.utils import make_cameras_from_configs
@@ -33,6 +32,7 @@ from lerobot.motors.feetech import (
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
 from .config_xlerobot import XLerobotConfig
+from .odometry import Omni3Kinematics, OdomTracker, apply_velocity_deadband
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,14 @@ class XLerobot(Robot):
         self.right_arm_motors = [m for m in (self.bus2.motors if self.bus2 else []) if m.startswith("right_arm")]
         self.head_motors = [m for m in (self.bus1.motors if self.bus1 else []) if m.startswith("head")]
         self.base_motors = [m for m in (self.bus2.motors if self.bus2 else []) if m.startswith("base")]
+        self.base_kinematics = Omni3Kinematics(
+            wheel_radius=self.config.wheel_radius,
+            base_radius=self.config.base_radius,
+            correction_degrees=self.config.base_correction_degrees,
+        )
+        self.odom = OdomTracker()
+        self.last_base_command = {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
+        self.last_base_velocity_source = "wheel"
         self.cameras = make_cameras_from_configs(config.cameras)
 
     @property
@@ -232,57 +240,47 @@ class XLerobot(Robot):
             x: float,
             y: float,
             theta: float,
-            wheel_radius: float = 0.05,
-            base_radius: float = 0.125,
+            wheel_radius: float = None,
+            base_radius: float = None,
             max_raw: int = 3000,
     ) -> dict:
         """
-        [Final Calibration] 3-Wheel Omni Kinematics with precise -150 degree correction.
+        [Final Calibration] 3-Wheel Omni Kinematics with precise frame correction.
         """
-        # 将旋转速度从 deg/s 转换为 rad/s
-        theta_rad = math.radians(theta)
+        kinematics = self.base_kinematics
+        if wheel_radius is not None or base_radius is not None:
+            kinematics = Omni3Kinematics(
+                wheel_radius=wheel_radius if wheel_radius is not None else self.config.wheel_radius,
+                base_radius=base_radius if base_radius is not None else self.config.base_radius,
+                correction_degrees=self.config.base_correction_degrees,
+            )
 
-        # === 1. 坐标系旋转修正 (核心) ===
-        # 根据你的反馈 "前进走向10点钟方向"，我们将修正角度精确地设置为 -150 度
-        correction_angle = math.radians(-175)
+        wheel_degps = kinematics.body_to_wheel_degps(x, y, theta)
 
-        # 应用旋转矩阵，得到修正后的 vx 和 vy
-        vx_new = x * math.cos(correction_angle) - y * math.sin(correction_angle)
-        vy_new = x * math.sin(correction_angle) + y * math.cos(correction_angle)
-
-        # 使用修正后的速度进行后续计算
-        x, y = vx_new, vy_new
-
-        # === 2. 运动学矩阵 (Kiwi Drive) ===
-        # 这个矩阵定义了三个轮子在物理上的角度分布
-        # 既然旋转是好的，这个矩阵就是正确的，保持不变
-        angles = np.radians(np.array([150, 270, 30]))
-        velocity_vector = np.array([x, y, theta_rad])
-        m = np.array([[np.cos(a), np.sin(a), base_radius] for a in angles])
-
-        # 计算轮速 (deg/s)
-        wheel_degps = m.dot(velocity_vector) / wheel_radius * (180.0 / np.pi)
-
-        # === 3. 速度限幅 ===
+        # === 速度限幅 ===
         steps_per_deg = 4096.0 / 360.0
         raw_floats = [abs(degps) * steps_per_deg for degps in wheel_degps]
         if raw_floats and (max_val := max(raw_floats)) > max_raw:
             scale = max_raw / max_val
             wheel_degps *= scale
 
-        # === 4. 转换为电机原始指令 ===
         wheel_raw = [self._degps_to_raw(deg) for deg in wheel_degps]
 
-        # === 5. 返回指令字典 (保持原始极性，不加负号) ===
-        # 既然旋转是好的，就证明这个组合是正确的
         return {
             "base_wheel_1": wheel_raw[0], # ID 7
             "base_wheel_2": wheel_raw[1], # ID 8
             "base_wheel_3": wheel_raw[2], # ID 9
         }
 
-    def _wheel_raw_to_body(self, raw_1, raw_2, raw_3, wheel_radius: float = 0.05, base_radius: float = 0.125):
-        return {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
+    def _wheel_raw_to_body(self, raw_1, raw_2, raw_3, wheel_radius: float = None, base_radius: float = None):
+        kinematics = self.base_kinematics
+        if wheel_radius is not None or base_radius is not None:
+            kinematics = Omni3Kinematics(
+                wheel_radius=wheel_radius if wheel_radius is not None else self.config.wheel_radius,
+                base_radius=base_radius if base_radius is not None else self.config.base_radius,
+                correction_degrees=self.config.base_correction_degrees,
+            )
+        return kinematics.wheel_raw_to_body(raw_1, raw_2, raw_3)
 
     def _from_keyboard_to_base_action(self, pressed_keys: np.ndarray):
         if self.teleop_keys["speed_up"] in pressed_keys: self.speed_index = min(self.speed_index + 1, 2)
@@ -312,7 +310,23 @@ class XLerobot(Robot):
                 pos2 = self.bus2.sync_read("Present_Position", motors_to_read2)
                 for k, v in pos2.items(): obs_dict[f"{k}.pos"] = v
 
-        obs_dict.update({"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
+        base_vel = {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0}
+        self.last_base_velocity_source = "none"
+        if self.bus2 and self.base_motors:
+            try:
+                base_wheel_vel = self.bus2.sync_read("Present_Velocity", self.base_motors)
+                base_vel = self._wheel_raw_to_body(
+                    base_wheel_vel.get("base_wheel_1", 0),
+                    base_wheel_vel.get("base_wheel_2", 0),
+                    base_wheel_vel.get("base_wheel_3", 0),
+                )
+                self.last_base_velocity_source = "wheel"
+            except Exception as e:
+                logger.warning(f"Failed to read base wheel velocities, using last command as odom fallback: {e}")
+                base_vel = self.last_base_command.copy()
+                self.last_base_velocity_source = "command_fallback"
+
+        obs_dict.update(base_vel)
         for cam_key, cam in self.cameras.items(): obs_dict[cam_key] = cam.async_read()
         return obs_dict
 
@@ -326,9 +340,49 @@ class XLerobot(Robot):
             targets2 = {k.replace(".pos", ""): v for k, v in action.items() if k.startswith("right_arm_")}
             if targets2: self.bus2.sync_write("Goal_Position", targets2)
             vx, vy, th = action.get("x.vel", 0.0), action.get("y.vel", 0.0), action.get("theta.vel", 0.0)
+            self.last_base_command = {"x.vel": vx, "y.vel": vy, "theta.vel": th}
             wheel_cmds = self._body_to_wheel_raw(vx, vy, th)
             if self.base_motors: self.bus2.sync_write("Goal_Velocity", wheel_cmds)
         return action
+
+    def reset_odometry(self, timestamp: float | None = None) -> None:
+        self.odom.reset(timestamp)
+
+    def update_odometry(self, timestamp: float | None = None, observation: dict[str, Any] | None = None) -> dict[str, Any]:
+        timestamp = time.time() if timestamp is None else timestamp
+        if observation is None:
+            observation = self.get_observation()
+        vx = float(observation.get("x.vel", 0.0))
+        vy = float(observation.get("y.vel", 0.0))
+        theta = float(observation.get("theta.vel", 0.0))
+        raw_vx, raw_vy, raw_theta = vx, vy, theta
+        vx, vy, theta = apply_velocity_deadband(
+            vx,
+            vy,
+            theta,
+            linear_deadband=self.config.odom_linear_deadband,
+            angular_deadband_degps=self.config.odom_angular_deadband_degps,
+        )
+        self.odom.update(vx, vy, theta, timestamp)
+        odom_msg = self.odom.as_odometry_dict(
+            timestamp,
+            vx,
+            vy,
+            theta,
+            frame_id=self.config.odom_frame_id,
+            child_frame_id=self.config.odom_child_frame_id,
+            source=self.last_base_velocity_source,
+        )
+        odom_msg["metadata"].update(
+            {
+                "raw_twist": {"x.vel": raw_vx, "y.vel": raw_vy, "theta.vel": raw_theta},
+                "deadband": {
+                    "linear": self.config.odom_linear_deadband,
+                    "angular_degps": self.config.odom_angular_deadband_degps,
+                },
+            }
+        )
+        return odom_msg
 
     def stop_base(self):
         if self.bus2 and self.bus2.is_connected and self.base_motors:
